@@ -1,0 +1,59 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: recipebook
+      POSTGRES_PASSWORD: recipebook
+      POSTGRES_DB: recipebook
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recipebook"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./recipebook-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: recipebook
+      DB_PASSWORD: recipebook
+      DB_NAME: recipebook
+      JWT_SECRET: change-me-in-production
+      ACCESS_TOKEN_TTL_MINUTES: "30"
+      REFRESH_TOKEN_TTL_DAYS: "7"
+      UPLOAD_DIR: /app/uploads
+      PORT: "8000"
+      CORS_ORIGIN: "*"
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./recipebook-frontend
+      args:
+        # Относительный путь — Nginx проксирует /api/ на backend
+        VITE_API_URL: /api/v1
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  uploads_data:
