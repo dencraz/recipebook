@@ -97,9 +97,9 @@ export function ReportsPage() {
                 <tbody>
                   {favData?.map((row, i) => (
                     <tr key={i} className="border-b border-stone-50 dark:border-stone-700/50 hover:bg-stone-50 dark:hover:bg-stone-700/30">
-                      <td className="px-4 py-3 text-stone-800 dark:text-stone-100">{row.title ?? row.recipe_title ?? row.name}</td>
+                      <td className="px-4 py-3 text-stone-800 dark:text-stone-100">{row.recipe?.title ?? row.title ?? row.recipe_title ?? row.name}</td>
                       <td className="px-4 py-3 text-stone-500 dark:text-stone-400">
-                        {row.added_at ? formatDate(row.added_at) : '—'}
+                        {row.created_at ? formatDate(row.created_at) : '—'}
                       </td>
                     </tr>
                   ))}
