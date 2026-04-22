@@ -58,8 +58,8 @@ export function MenuPlannerPage() {
   const handleDownloadShoppingList = async () => {
     try {
       await downloadFile(`/menu-plan/shopping-list/pdf?week_start=${weekStartISO}`, 'shopping-list.pdf')
-    } catch {
-      toast.error('Ошибка скачивания')
+    } catch (err) {
+      toast.error(err?.message ?? 'Ошибка скачивания')
     }
   }
 

@@ -3,15 +3,18 @@ package utils
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"time"
 
-	"recipebook/internal/models"
-
-	"github.com/jung-kurt/gofpdf"
+	"github.com/unidoc/unipdf/v3/creator"
+	"github.com/unidoc/unipdf/v3/model"
 	"github.com/xuri/excelize/v2"
+
+	"recipebook/internal/models"
 )
 
-// GenerateFavoritesXLSX returns XLSX bytes for favorites report
+// ─── XLSX ─────────────────────────────────────────────────────────────────────
+
 func GenerateFavoritesXLSX(favs []models.Favorite) ([]byte, error) {
 	f := excelize.NewFile()
 	sheet := "Избранное"
@@ -22,28 +25,22 @@ func GenerateFavoritesXLSX(favs []models.Favorite) ([]byte, error) {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		f.SetCellValue(sheet, cell, h)
 	}
-
 	for i, fav := range favs {
 		row := i + 2
-		category := ""
-		if fav.Recipe != nil && fav.Recipe.Category != nil {
-			category = fav.Recipe.Category.Name
-		}
-		title := ""
-		difficulty := ""
-		cookTime := 0
+		category, title, difficulty, cookTime := "", "", "", 0
 		if fav.Recipe != nil {
 			title = fav.Recipe.Title
 			difficulty = fav.Recipe.Difficulty
 			cookTime = fav.Recipe.CookTime
+			if fav.Recipe.Category != nil {
+				category = fav.Recipe.Category.Name
+			}
 		}
-		vals := []interface{}{i + 1, title, category, difficulty, cookTime}
-		for j, v := range vals {
+		for j, v := range []interface{}{i + 1, title, category, difficulty, cookTime} {
 			cell, _ := excelize.CoordinatesToCellName(j+1, row)
 			f.SetCellValue(sheet, cell, v)
 		}
 	}
-
 	var buf bytes.Buffer
 	if err := f.Write(&buf); err != nil {
 		return nil, err
@@ -51,7 +48,6 @@ func GenerateFavoritesXLSX(favs []models.Favorite) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// CategoryStat for categories report
 type CategoryStat struct {
 	Name        string
 	RecipeCount int64
@@ -69,8 +65,7 @@ func GenerateCategoriesXLSX(stats []CategoryStat) ([]byte, error) {
 	}
 	for i, s := range stats {
 		row := i + 2
-		vals := []interface{}{i + 1, s.Name, s.RecipeCount}
-		for j, v := range vals {
+		for j, v := range []interface{}{i + 1, s.Name, s.RecipeCount} {
 			cell, _ := excelize.CoordinatesToCellName(j+1, row)
 			f.SetCellValue(sheet, cell, v)
 		}
@@ -82,229 +77,463 @@ func GenerateCategoriesXLSX(stats []CategoryStat) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func newPDF() *gofpdf.Fpdf {
-	pdf := gofpdf.New("P", "mm", "A4", "")
-	pdf.SetMargins(15, 15, 15)
-	ensureFonts()
-	if fontRegular != "" {
-		pdf.AddUTF8Font("DejaVu", "", fontRegular)
-		if fontBold != "" {
-			pdf.AddUTF8Font("DejaVu", "B", fontBold)
-		} else {
-			pdf.AddUTF8Font("DejaVu", "B", fontRegular)
-		}
-		pdf.SetFont("DejaVu", "", 11)
-	}
-	return pdf
+// ─── PDF builder (unipdf) ─────────────────────────────────────────────────────
+
+// Палитра цветов документа.
+var (
+	clrOrange  = creator.ColorRGBFrom8bit(210, 90, 20)
+	clrBeige   = creator.ColorRGBFrom8bit(245, 228, 205)
+	clrBrown   = creator.ColorRGBFrom8bit(80, 50, 10)
+	clrTitle   = creator.ColorRGBFrom8bit(180, 70, 0)
+	clrGray    = creator.ColorRGBFrom8bit(100, 100, 100)
+	clrWhite   = creator.ColorRGBFrom8bit(255, 255, 255)
+	clrBlack   = creator.ColorRGBFrom8bit(0, 0, 0)
+	clrRow1    = creator.ColorRGBFrom8bit(252, 252, 252)
+	clrRow2    = creator.ColorRGBFrom8bit(243, 243, 243)
+	clrSummary = creator.ColorRGBFrom8bit(250, 243, 230)
+)
+
+type pdfBuilder struct {
+	c    *creator.Creator
+	reg  *model.PdfFont
+	bold *model.PdfFont
 }
 
-func GenerateFavoritesPDF(favs []models.Favorite) ([]byte, error) {
-	pdf := newPDF()
-	pdf.AddPage()
-	pdf.SetFont("DejaVu", "B", 16)
-	pdf.Cell(0, 10, "Избранные рецепты")
-	pdf.Ln(12)
-	pdf.SetFont("DejaVu", "", 11)
+// newPDFBuilder создаёт Creator (unipdf) с загруженными TTF-шрифтами.
+func newPDFBuilder() (*pdfBuilder, error) {
+	ensureFonts() // гарантирует, что fontRegular/fontBold указывают на TTF-файлы
 
-	for i, fav := range favs {
-		title := ""
-		category := ""
-		if fav.Recipe != nil {
-			title = fav.Recipe.Title
-			if fav.Recipe.Category != nil {
-				category = fav.Recipe.Category.Name
-			}
-		}
-		line := fmt.Sprintf("%d. %s [%s]", i+1, title, category)
-		pdf.Cell(0, 8, line)
-		pdf.Ln(8)
+	c := creator.New()
+	c.SetPageSize(creator.PageSizeA4)
+	c.SetPageMargins(42, 42, 42, 42) // ≈15 мм с каждой стороны
+
+	reg, err := openFont(fontRegular, model.HelveticaName)
+	if err != nil {
+		return nil, fmt.Errorf("PDF: не удалось загрузить шрифт: %w", err)
+	}
+	bold, _ := openFont(fontBold, model.HelveticaBoldName)
+	if bold == nil {
+		bold = reg
 	}
 
+	return &pdfBuilder{c: c, reg: reg, bold: bold}, nil
+}
+
+// openFont загружает TTF-файл; при неудаче откатывается на стандартный шрифт PDF.
+func openFont(ttfPath string, fallback model.StandardFont) (*model.PdfFont, error) {
+	if ttfPath != "" {
+		if f, err := model.NewPdfFontFromTTFFile(ttfPath); err == nil {
+			return f, nil
+		}
+	}
+	return model.NewStandard14Font(fallback)
+}
+
+// toBytes сериализует PDF в []byte.
+func (b *pdfBuilder) toBytes() ([]byte, error) {
 	var buf bytes.Buffer
-	if err := pdf.Output(&buf); err != nil {
+	if err := b.c.Write(&buf); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
 }
 
+// par создаёт параграф с заданным шрифтом, размером, цветом и отступами.
+func (b *pdfBuilder) par(text string, font *model.PdfFont, size float64, clr creator.Color, leftPad, bottomPad float64) *creator.Paragraph {
+	p := b.c.NewParagraph(text)
+	p.SetFont(font)
+	p.SetFontSize(size)
+	p.SetColor(clr)
+	p.SetMargins(leftPad, 0, 0, bottomPad)
+	return p
+}
+
+// drawPar рисует параграф.
+func (b *pdfBuilder) drawPar(text string, font *model.PdfFont, size float64, clr creator.Color, leftPad, bottomPad float64) error {
+	return b.c.Draw(b.par(text, font, size, clr, leftPad, bottomPad))
+}
+
+// bandTable рисует полноширинную полосу с цветным фоном и текстом.
+func (b *pdfBuilder) bandTable(text string, textFont *model.PdfFont, fontSize float64,
+	textClr, bgClr creator.Color, topMargin, botMargin float64) error {
+
+	t := b.c.NewTable(1)
+	t.SetColumnWidths(1.0)
+	t.SetMargins(0, 0, topMargin, botMargin)
+
+	cell := t.NewCell()
+	p := b.par("  "+text, textFont, fontSize, textClr, 0, 0)
+	cell.SetContent(p)
+	cell.SetBackgroundColor(bgClr)
+	return b.c.Draw(t)
+}
+
+// sectionHeader — оранжевая полоса для раздела.
+func (b *pdfBuilder) sectionHeader(text string) error {
+	return b.bandTable(text, b.bold, 12, clrWhite, clrOrange, 10, 5)
+}
+
+// dayHeader — бежевая полоса для дня.
+func (b *pdfBuilder) dayHeader(text string) error {
+	return b.bandTable(text, b.bold, 10, clrBrown, clrBeige, 4, 2)
+}
+
+// mealRow рисует строку приёма пищи: "  [Завтрак]  Название рецепта (N ингр.)".
+func (b *pdfBuilder) mealRow(mealName, recipeName string, ingCount int) error {
+	sp := b.c.NewStyledParagraph()
+	sp.SetMargins(8, 0, 0, 3)
+
+	label := sp.Append(mealName + ":  ")
+	label.Style.Font = b.bold
+	label.Style.FontSize = 9
+	label.Style.Color = clrBlack
+
+	suffix := recipeName
+	if ingCount > 0 {
+		suffix += fmt.Sprintf("  (%d ингр.)", ingCount)
+	}
+	val := sp.Append(suffix)
+	val.Style.Font = b.reg
+	val.Style.FontSize = 9
+	val.Style.Color = clrBlack
+
+	return b.c.Draw(sp)
+}
+
+// ingRow рисует строку ингредиента с маркером «•».
+func (b *pdfBuilder) ingRow(name, amount string, indent float64) error {
+	return b.drawPar("• "+name+"  —  "+amount, b.reg, 9, clrBlack, indent, 2)
+}
+
+// summaryIngRow рисует строку в блоке «Итого за день» / «Список покупок».
+func (b *pdfBuilder) summaryIngRow(num int, name, amount string, bgClr creator.Color) error {
+	t := b.c.NewTable(2)
+	t.SetColumnWidths(0.08, 0.92)
+	t.SetMargins(0, 0, 0, 0)
+
+	numCell := t.NewCell()
+	numCell.SetBackgroundColor(bgClr)
+	numCell.SetHorizontalAlignment(creator.CellHorizontalAlignmentRight)
+	np := b.par(fmt.Sprintf("%d.", num), b.bold, 9, clrBlack, 0, 0)
+	numCell.SetContent(np)
+
+	valCell := t.NewCell()
+	valCell.SetBackgroundColor(bgClr)
+	vp := b.par("  "+name+"  —  "+amount, b.reg, 9, clrBlack, 0, 0)
+	valCell.SetContent(vp)
+
+	return b.c.Draw(t)
+}
+
+// ─── Favorites PDF ────────────────────────────────────────────────────────────
+
+func GenerateFavoritesPDF(favs []models.Favorite) ([]byte, error) {
+	b, err := newPDFBuilder()
+	if err != nil {
+		return nil, err
+	}
+	b.c.NewPage()
+
+	b.drawPar("Избранные рецепты", b.bold, 20, clrTitle, 0, 12)
+
+	for i, fav := range favs {
+		if fav.Recipe == nil {
+			continue
+		}
+		cat := ""
+		if fav.Recipe.Category != nil {
+			cat = "  [" + fav.Recipe.Category.Name + "]"
+		}
+		line := fmt.Sprintf("%d. %s%s", i+1, fav.Recipe.Title, cat)
+		b.drawPar(line, b.reg, 10, clrBlack, 0, 4)
+	}
+
+	return b.toBytes()
+}
+
+// ─── Categories PDF ───────────────────────────────────────────────────────────
+
 func GenerateCategoriesPDF(stats []CategoryStat) ([]byte, error) {
-	pdf := newPDF()
-	pdf.AddPage()
-	pdf.SetFont("DejaVu", "B", 16)
-	pdf.Cell(0, 10, "Рецепты по категориям")
-	pdf.Ln(12)
-	pdf.SetFont("DejaVu", "", 11)
+	b, err := newPDFBuilder()
+	if err != nil {
+		return nil, err
+	}
+	b.c.NewPage()
+
+	b.drawPar("Рецепты по категориям", b.bold, 20, clrTitle, 0, 12)
 
 	for i, s := range stats {
 		line := fmt.Sprintf("%d. %s — %d рецептов", i+1, s.Name, s.RecipeCount)
-		pdf.Cell(0, 8, line)
-		pdf.Ln(8)
+		b.drawPar(line, b.reg, 10, clrBlack, 0, 4)
 	}
 
-	var buf bytes.Buffer
-	if err := pdf.Output(&buf); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return b.toBytes()
 }
 
-func GenerateShoppingListPDF(plans []models.MenuPlan, weekStart time.Time) ([]byte, error) {
-	mealNames := map[string]string{
-		"breakfast": "Завтрак",
-		"lunch":     "Обед",
-		"dinner":    "Ужин",
-	}
-	dayNamesRu := []string{"Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"}
+// ─── Shopping List PDF ────────────────────────────────────────────────────────
 
-	// Group by date
-	type dayEntry struct {
-		label string
-		date  string
-		slots []models.MenuPlan
-	}
-	days := make([]dayEntry, 7)
+var mealNamesRu = map[string]string{
+	"breakfast": "Завтрак",
+	"lunch":     "Обед",
+	"dinner":    "Ужин",
+}
+var mealOrder = []string{"breakfast", "lunch", "dinner"}
+var dayNamesRu = []string{
+	"Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье",
+}
+
+type dayData struct {
+	label   string
+	dateStr string
+	meals   map[string]*models.Recipe
+}
+
+// GenerateShoppingListPDF строит PDF из трёх разделов:
+//  1. Расписание на неделю — приёмы пищи по дням, кол-во блюд
+//  2. Ингредиенты по дням — разбивка по блюдам + итого уникальных за день
+//  3. Список покупок на всю неделю — уникальные ингредиенты с суммарным кол-вом
+func GenerateShoppingListPDF(plans []models.MenuPlan, weekStart time.Time) ([]byte, error) {
+	// ── сетка дней ───────────────────────────────────────────────────────────
+	days := make([]dayData, 7)
 	for i := 0; i < 7; i++ {
 		d := weekStart.AddDate(0, 0, i)
-		days[i] = dayEntry{
-			label: fmt.Sprintf("%s (%s)", dayNamesRu[i], d.Format("02.01")),
-			date:  d.Format("2006-01-02"),
+		days[i] = dayData{
+			label:   fmt.Sprintf("%s, %s", dayNamesRu[i], d.Format("02.01.2006")),
+			dateStr: d.Format("2006-01-02"),
+			meals:   map[string]*models.Recipe{},
 		}
 	}
-	for _, p := range plans {
+	for i := range plans {
+		p := &plans[i]
+		if p.Recipe == nil {
+			continue
+		}
 		ds := p.Date.Format("2006-01-02")
-		for i := range days {
-			if days[i].date == ds {
-				days[i].slots = append(days[i].slots, p)
+		for j := range days {
+			if days[j].dateStr == ds {
+				days[j].meals[p.MealType] = p.Recipe
 				break
 			}
 		}
 	}
 
-	// Aggregate all ingredients
-	ingredientMap := map[string]string{}
-	for _, p := range plans {
-		if p.Recipe == nil {
+	// ── недельный список ингредиентов ─────────────────────────────────────────
+	type ingEntry struct{ amounts []string }
+	weekIngMap := map[string]*ingEntry{}
+	weekIngOrder := []string{}
+
+	for i := range plans {
+		if plans[i].Recipe == nil {
 			continue
 		}
-		for _, ing := range p.Recipe.Ingredients {
-			if existing, ok := ingredientMap[ing.Name]; ok {
-				ingredientMap[ing.Name] = existing + " + " + ing.Amount
-			} else {
-				ingredientMap[ing.Name] = ing.Amount
+		for _, ing := range plans[i].Recipe.Ingredients {
+			if _, ok := weekIngMap[ing.Name]; !ok {
+				weekIngOrder = append(weekIngOrder, ing.Name)
+				weekIngMap[ing.Name] = &ingEntry{}
 			}
+			weekIngMap[ing.Name].amounts = append(weekIngMap[ing.Name].amounts, ing.Amount)
 		}
 	}
+	sort.Strings(weekIngOrder)
 
-	pdf := newPDF()
-	pdf.AddPage()
-
-	// Title
-	pdf.SetFont("DejaVu", "B", 16)
-	pdf.Cell(0, 10, fmt.Sprintf("Меню на неделю с %s", weekStart.Format("02.01.2006")))
-	pdf.Ln(14)
-
-	// === SECTION 1: Recipes by day ===
-	pdf.SetFont("DejaVu", "B", 13)
-	pdf.Cell(0, 8, "Рецепты по дням")
-	pdf.Ln(10)
-
-	mealOrder := []string{"breakfast", "lunch", "dinner"}
-	for _, day := range days {
-		if len(day.slots) == 0 {
-			continue
-		}
-		pdf.SetFont("DejaVu", "B", 11)
-		pdf.SetFillColor(245, 245, 245)
-		pdf.CellFormat(0, 7, day.label, "", 1, "", true, 0, "")
-		pdf.Ln(1)
-
-		slotMap := map[string]models.MenuPlan{}
-		for _, s := range day.slots {
-			slotMap[s.MealType] = s
-		}
-
-		for _, mt := range mealOrder {
-			s, ok := slotMap[mt]
-			if !ok || s.Recipe == nil {
-				continue
-			}
-			mealLabel := mealNames[mt]
-			pdf.SetFont("DejaVu", "B", 10)
-			pdf.Cell(30, 6, mealLabel+":")
-			pdf.SetFont("DejaVu", "", 10)
-			pdf.Cell(0, 6, s.Recipe.Title)
-			pdf.Ln(6)
-
-			if len(s.Recipe.Ingredients) > 0 {
-				pdf.SetFont("DejaVu", "", 9)
-				for _, ing := range s.Recipe.Ingredients {
-					pdf.Cell(10, 5, "")
-					pdf.Cell(0, 5, fmt.Sprintf("- %s: %s", ing.Name, ing.Amount))
-					pdf.Ln(5)
-				}
-			}
-			pdf.Ln(2)
-		}
-		pdf.Ln(3)
+	totalDishes := 0
+	for _, d := range days {
+		totalDishes += len(d.meals)
 	}
 
-	// === SECTION 2: All recipes of the week ===
-	if pdf.GetY() > 220 {
-		pdf.AddPage()
-	}
-	pdf.SetFont("DejaVu", "B", 13)
-	pdf.Cell(0, 8, "Все рецепты на неделю")
-	pdf.Ln(10)
-
-	seen := map[uint]bool{}
-	recipeNum := 1
-	for _, p := range plans {
-		if p.Recipe == nil || seen[p.RecipeID] {
-			continue
-		}
-		seen[p.RecipeID] = true
-		pdf.SetFont("DejaVu", "B", 10)
-		pdf.Cell(0, 6, fmt.Sprintf("%d. %s", recipeNum, p.Recipe.Title))
-		pdf.Ln(6)
-		recipeNum++
-		if len(p.Recipe.Ingredients) > 0 {
-			pdf.SetFont("DejaVu", "", 9)
-			for _, ing := range p.Recipe.Ingredients {
-				pdf.Cell(8, 5, "")
-				pdf.Cell(0, 5, fmt.Sprintf("- %s: %s", ing.Name, ing.Amount))
-				pdf.Ln(5)
-			}
-		}
-		if len(p.Recipe.Steps) > 0 {
-			pdf.SetFont("DejaVu", "", 9)
-			for si, step := range p.Recipe.Steps {
-				pdf.Cell(8, 5, "")
-				stepText := fmt.Sprintf("Шаг %d: %s", si+1, step.Description)
-				pdf.MultiCell(0, 5, stepText, "", "", false)
-			}
-		}
-		pdf.Ln(4)
-	}
-
-	// === SECTION 3: Shopping list (all ingredients) ===
-	if pdf.GetY() > 220 {
-		pdf.AddPage()
-	}
-	pdf.SetFont("DejaVu", "B", 13)
-	pdf.Cell(0, 8, "Список покупок (все ингредиенты)")
-	pdf.Ln(10)
-	pdf.SetFont("DejaVu", "", 11)
-
-	i := 1
-	for name, amount := range ingredientMap {
-		pdf.Cell(0, 7, fmt.Sprintf("%d. %s — %s", i, name, amount))
-		pdf.Ln(7)
-		i++
-	}
-
-	var buf bytes.Buffer
-	if err := pdf.Output(&buf); err != nil {
+	// ── PDF builder ───────────────────────────────────────────────────────────
+	b, err := newPDFBuilder()
+	if err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+
+	weekEnd := weekStart.AddDate(0, 0, 6)
+
+	// ════════════════════════════════════════════════════════════════════════
+	// Титульная страница
+	// ════════════════════════════════════════════════════════════════════════
+	b.c.NewPage()
+
+	b.drawPar("Список покупок на неделю", b.bold, 22, clrTitle, 0, 8)
+	b.drawPar(
+		fmt.Sprintf("Период: %s — %s", weekStart.Format("02.01.2006"), weekEnd.Format("02.01.2006")),
+		b.reg, 11, clrGray, 0, 4,
+	)
+	b.drawPar(
+		fmt.Sprintf("Блюд запланировано: %d  |  Уникальных ингредиентов: %d",
+			totalDishes, len(weekIngOrder)),
+		b.reg, 10, clrGray, 0, 12,
+	)
+
+	// Сводная таблица по дням.
+	summaryTable := b.c.NewTable(3)
+	summaryTable.SetColumnWidths(0.55, 0.22, 0.23)
+	summaryTable.SetMargins(0, 0, 0, 14)
+
+	for _, hdr := range []string{"День", "Блюд", "Ингредиентов"} {
+		cell := summaryTable.NewCell()
+		cell.SetBackgroundColor(clrOrange)
+		p := b.par(hdr, b.bold, 9, clrWhite, 4, 0)
+		cell.SetContent(p)
+		cell.SetHorizontalAlignment(creator.CellHorizontalAlignmentCenter)
+	}
+	for i, day := range days {
+		ingCount := 0
+		for _, mt := range mealOrder {
+			if r := day.meals[mt]; r != nil {
+				ingCount += len(r.Ingredients)
+			}
+		}
+		bg := clrRow1
+		if i%2 == 1 {
+			bg = clrRow2
+		}
+		for ci, txt := range []string{day.label, fmt.Sprintf("%d", len(day.meals)), fmt.Sprintf("%d", ingCount)} {
+			cell := summaryTable.NewCell()
+			cell.SetBackgroundColor(bg)
+			align := creator.CellHorizontalAlignmentLeft
+			if ci > 0 {
+				align = creator.CellHorizontalAlignmentCenter
+			}
+			cell.SetHorizontalAlignment(align)
+			cell.SetContent(b.par("  "+txt, b.reg, 9, clrBlack, 0, 0))
+		}
+	}
+	b.c.Draw(summaryTable)
+
+	// ════════════════════════════════════════════════════════════════════════
+	// РАЗДЕЛ 1 — Расписание приёмов пищи
+	// ════════════════════════════════════════════════════════════════════════
+	b.sectionHeader("Раздел 1: Расписание приёмов пищи")
+
+	for _, day := range days {
+		dishCount := len(day.meals)
+		b.dayHeader(fmt.Sprintf("%s  [%d блюд]", day.label, dishCount))
+
+		if dishCount == 0 {
+			b.drawPar("нет запланированных блюд", b.reg, 9, clrGray, 12, 4)
+			continue
+		}
+		for _, mt := range mealOrder {
+			r := day.meals[mt]
+			title := "—"
+			ingCount := 0
+			if r != nil {
+				title = r.Title
+				ingCount = len(r.Ingredients)
+			}
+			b.mealRow(mealNamesRu[mt], title, ingCount)
+		}
+		b.drawPar("", b.reg, 4, clrBlack, 0, 0) // отступ между днями
+	}
+
+	// ════════════════════════════════════════════════════════════════════════
+	// РАЗДЕЛ 2 — Ингредиенты по дням
+	// ════════════════════════════════════════════════════════════════════════
+	b.c.NewPage()
+	b.sectionHeader("Раздел 2: Ингредиенты по дням")
+
+	for _, day := range days {
+		if len(day.meals) == 0 {
+			continue
+		}
+		b.dayHeader(fmt.Sprintf("%s  [%d блюд]", day.label, len(day.meals)))
+
+		dayIngMap := map[string][]string{}
+		dayIngOrder := []string{}
+
+		for _, mt := range mealOrder {
+			r := day.meals[mt]
+			if r == nil {
+				continue
+			}
+			// Подзаголовок приёма пищи.
+			b.drawPar(mealNamesRu[mt]+": "+r.Title, b.bold, 9, clrBlack, 8, 3)
+
+			if len(r.Ingredients) == 0 {
+				b.drawPar("нет ингредиентов", b.reg, 8, clrGray, 20, 3)
+				continue
+			}
+			for _, ing := range r.Ingredients {
+				b.ingRow(ing.Name, ing.Amount, 20)
+				if _, exists := dayIngMap[ing.Name]; !exists {
+					dayIngOrder = append(dayIngOrder, ing.Name)
+				}
+				dayIngMap[ing.Name] = append(dayIngMap[ing.Name], ing.Amount)
+			}
+			b.drawPar("", b.reg, 3, clrBlack, 0, 0)
+		}
+
+		// Итого за день.
+		if len(dayIngOrder) > 0 {
+			b.bandTable(
+				fmt.Sprintf("Итого за день: %d уникальных ингредиента(-ов)", len(dayIngOrder)),
+				b.bold, 9, clrBrown, clrSummary, 4, 2,
+			)
+			for i, name := range dayIngOrder {
+				bg := clrRow1
+				if i%2 == 1 {
+					bg = clrRow2
+				}
+				b.summaryIngRow(i+1, name, mergeAmounts(dayIngMap[name]), bg)
+			}
+		}
+		b.drawPar("", b.reg, 6, clrBlack, 0, 0)
+	}
+
+	// ════════════════════════════════════════════════════════════════════════
+	// РАЗДЕЛ 3 — Список покупок на всю неделю
+	// ════════════════════════════════════════════════════════════════════════
+	b.c.NewPage()
+	b.sectionHeader("Раздел 3: Список покупок на всю неделю")
+
+	b.drawPar(
+		fmt.Sprintf("Всего уникальных ингредиентов: %d", len(weekIngOrder)),
+		b.reg, 10, clrGray, 0, 8,
+	)
+
+	if len(weekIngOrder) == 0 {
+		b.drawPar("На эту неделю блюда не запланированы.", b.reg, 10, clrGray, 0, 0)
+	} else {
+		for idx, name := range weekIngOrder {
+			bg := clrRow1
+			if idx%2 == 1 {
+				bg = clrRow2
+			}
+			b.summaryIngRow(idx+1, name, mergeAmounts(weekIngMap[name].amounts), bg)
+		}
+	}
+
+	return b.toBytes()
+}
+
+// mergeAmounts объединяет список количеств одного ингредиента.
+// Одинаковые значения схлопываются через "×N".
+func mergeAmounts(amounts []string) string {
+	if len(amounts) == 0 {
+		return ""
+	}
+	if len(amounts) == 1 {
+		return amounts[0]
+	}
+	cnt := map[string]int{}
+	order := []string{}
+	for _, a := range amounts {
+		if cnt[a] == 0 {
+			order = append(order, a)
+		}
+		cnt[a]++
+	}
+	result := ""
+	for i, a := range order {
+		if i > 0 {
+			result += " + "
+		}
+		if cnt[a] > 1 {
+			result += fmt.Sprintf("%s×%d", a, cnt[a])
+		} else {
+			result += a
+		}
+	}
+	return result
 }

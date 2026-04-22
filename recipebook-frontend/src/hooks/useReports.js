@@ -19,34 +19,15 @@ export function useCategoriesReport(params) {
   })
 }
 
-export async function downloadFavoritesXlsx() {
+async function handleDownload(url, filename) {
   try {
-    await downloadFile('/reports/favorites/xlsx', 'favorites.xlsx')
-  } catch {
-    toast.error('Ошибка скачивания')
+    await downloadFile(url, filename)
+  } catch (err) {
+    toast.error(err?.message ?? 'Ошибка скачивания')
   }
 }
 
-export async function downloadFavoritesPdf() {
-  try {
-    await downloadFile('/reports/favorites/pdf', 'favorites.pdf')
-  } catch {
-    toast.error('Ошибка скачивания')
-  }
-}
-
-export async function downloadCategoriesXlsx() {
-  try {
-    await downloadFile('/reports/categories/xlsx', 'categories.xlsx')
-  } catch {
-    toast.error('Ошибка скачивания')
-  }
-}
-
-export async function downloadCategoriesPdf() {
-  try {
-    await downloadFile('/reports/categories/pdf', 'categories.pdf')
-  } catch {
-    toast.error('Ошибка скачивания')
-  }
-}
+export const downloadFavoritesXlsx  = () => handleDownload('/reports/favorites/xlsx',   'favorites.xlsx')
+export const downloadFavoritesPdf   = () => handleDownload('/reports/favorites/pdf',    'favorites.pdf')
+export const downloadCategoriesXlsx = () => handleDownload('/reports/categories/xlsx',  'categories.xlsx')
+export const downloadCategoriesPdf  = () => handleDownload('/reports/categories/pdf',   'categories.pdf')
